@@ -36,6 +36,13 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 # ---------------------------------------------------------------------------
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
+if not CONFIG_PATH.exists():
+    raise FileNotFoundError(
+        f"\n[SETUP ERROR] config/settings.yaml not found at: {CONFIG_PATH}\n"
+        f"Make sure config/settings.yaml is committed to your GitHub repo.\n"
+        f"Repo root expected at: {CONFIG_PATH.parent.parent}"
+    )
+
 with open(CONFIG_PATH, "r") as f:
     CFG = yaml.safe_load(f)
 
