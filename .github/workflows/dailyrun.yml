@@ -55,6 +55,14 @@ jobs:
           pip install -r requirements.txt
 
       # -----------------------------------------------------------------
+      - name: Verify installed packages
+        run: |
+          echo "=== Installed packages ==="
+          pip show nsepythonserver || echo "nsepythonserver NOT found"
+          pip show nsepython || echo "nsepython NOT found"
+          python -c "from nsepythonserver import nse_optionchain_scrapper, nsefii; print('nsepythonserver import OK')" || echo "nsepythonserver import FAILED"
+
+      # -----------------------------------------------------------------
       - name: Create runtime directories
         run: |
           mkdir -p data/raw data/processed logs
