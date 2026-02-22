@@ -1,0 +1,85 @@
+# ============================================================
+# INDIAN GAP PREDICTION BOT - Configuration
+# ============================================================
+
+# --- Index Settings ---
+index:
+  name: "SENSEX"
+  yfinance_ticker: "^BSESN"       # Sensex ticker on Yahoo Finance
+  nse_vix_symbol: "INDIAVIX"      # India VIX from NSE
+  sp500_ticker: "^GSPC"           # S&P 500 for US market data
+  gift_nifty_ticker: "^NSEI"      # Gift Nifty proxy (SGX Nifty approximation)
+
+# --- BSE Sensex Option Chain ---
+option_chain:
+  source: "NSE"                   # NSE endpoint for Sensex options
+  symbol: "SENSEX"
+  snapshot_time_ist: "15:00"      # Take snapshot at 3:00 PM IST
+  signal_time_ist: "15:20"        # Generate signal by 3:20 PM IST
+
+# --- Data Sources ---
+data_sources:
+  fii_dii_url: "https://www.nseindia.com/api/fiidiiTradeReact"
+  nsdl_fii_url: "https://www.fpi.nsdl.co.in/web/Reports/Latest.aspx"
+  bse_rss_feed: "https://api.bseindia.com/BseIndiaAPI/api/RssFeed/w"
+  nse_rss_feed: "https://www.nseindia.com/api/home-market-status"
+  moneycontrol_rss: "https://www.moneycontrol.com/rss/latestnews.xml"
+  economic_times_rss: "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"
+
+# --- Data Storage ---
+storage:
+  db_path: "data/gap_bot.db"
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  logs_dir: "logs"
+
+# --- Historical Backtest ---
+backtest:
+  years: 5
+  start_date: null                # null = auto-calculate as today - 5 years
+
+# --- Feature Engineering ---
+features:
+  rolling_window_short: 5         # days
+  rolling_window_long: 20         # days
+  vix_percentile_window: 252      # 1 trading year
+  adx_period: 14
+
+# --- Regime Detection ---
+regime:
+  n_states: 4                     # Trending / Volatile / Sideways / Event-Driven
+  hmm_n_iter: 100
+  hmm_covariance_type: "diag"
+
+# --- Probability Model ---
+model:
+  mcmc_draws: 1000
+  mcmc_tune: 500
+  mcmc_chains: 2
+  mcmc_target_accept: 0.9
+
+# --- Option Selector ---
+option_selector:
+  direction_threshold: 0.60       # Min probability for directional trade
+  min_ev_positive: 0.0            # EV must be > 0 over backtest
+  backtest_years_ev: 5
+
+# --- Email Signal ---
+email:
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 587
+  sender_env_var: "EMAIL_SENDER"       # GitHub Secret name
+  password_env_var: "EMAIL_APP_PASS"   # GitHub Secret name (App Password)
+  receiver_env_var: "EMAIL_RECEIVER"   # GitHub Secret name
+
+# --- Scheduler (for reference, actual schedule in workflow yaml) ---
+scheduler:
+  pipeline_start_ist: "14:00"
+  pipeline_end_ist: "15:20"
+  timezone: "Asia/Kolkata"
+
+# --- Logging ---
+logging:
+  level: "INFO"
+  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
