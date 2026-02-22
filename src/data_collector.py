@@ -32,7 +32,7 @@ import feedparser
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 try:
-    from nsepython import nse_optionchain_scrapper, nsefii
+    from nsepythonserver import nse_optionchain_scrapper, nsefii
     NSEPYTHON_AVAILABLE = True
 except ImportError:
     NSEPYTHON_AVAILABLE = False
