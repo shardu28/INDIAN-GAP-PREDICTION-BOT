@@ -31,6 +31,12 @@ import requests
 import feedparser
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+try:
+    from nsepython import nse_optionchain_scrapper, nsefii
+    NSEPYTHON_AVAILABLE = True
+except ImportError:
+    NSEPYTHON_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Load config
 # ---------------------------------------------------------------------------
@@ -155,38 +161,30 @@ def fetch_sensex_ohlc(period: str = "5y") -> pd.DataFrame:
 
 def fetch_india_vix(session: requests.Session) -> pd.DataFrame:
     """
-    Fetches India VIX current value from NSE API.
-    For historical VIX, falls back to yfinance (^VIX is US VIX;
-    NSE historical VIX needs separate endpoint).
+    Fetches India VIX current value via yfinance (^INDIAVIX).
+    NSE session approach blocked on GitHub Actions IPs — yfinance is reliable.
 
     Returns:
         DataFrame with columns: Date, VIX_Close
     """
-    logger.info("Fetching India VIX from NSE...")
-
-    # --- Live VIX value ---
-    vix_url = "https://www.nseindia.com/api/allIndices"
+    logger.info("Fetching India VIX live via yfinance (^INDIAVIX)...")
     try:
-        resp = session.get(vix_url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-
-        vix_value = None
-        for item in data.get("data", []):
-            if item.get("index") == "INDIA VIX":
-                vix_value = float(item.get("last", 0))
-                break
-
-        if vix_value is None:
-            logger.warning("India VIX not found in NSE allIndices response.")
+        df = yf.download("^INDIAVIX", period="5d", progress=False, auto_adjust=True)
+        if df.empty:
+            logger.warning("yfinance returned empty DataFrame for ^INDIAVIX.")
             return pd.DataFrame()
 
-        today = date.today()
-        df = pd.DataFrame([{"Date": today, "VIX_Close": vix_value}])
+        df.reset_index(inplace=True)
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        df = df[["Date", "Close"]].rename(columns={"Close": "VIX_Close"})
+        df["Date"] = pd.to_datetime(df["Date"]).dt.date
+
+        # Return only latest value as live
+        latest = df.tail(1).copy()
         save_path = RAW_DIR / "india_vix_live.csv"
-        df.to_csv(save_path, index=False)
-        logger.info(f"India VIX live value: {vix_value} | saved → {save_path}")
-        return df
+        latest.to_csv(save_path, index=False)
+        logger.info(f"India VIX live: {latest['VIX_Close'].values[0]:.2f} | saved → {save_path}")
+        return latest
 
     except Exception as e:
         logger.error(f"India VIX live fetch failed: {e}")
@@ -197,57 +195,32 @@ def fetch_india_vix_historical(session: requests.Session,
                                from_date: str = None,
                                to_date: str = None) -> pd.DataFrame:
     """
-    Fetches historical India VIX from NSE historical API.
-
-    Args:
-        from_date: 'DD-MM-YYYY' format. Defaults to 5 years ago.
-        to_date:   'DD-MM-YYYY' format. Defaults to today.
+    Fetches historical India VIX via yfinance (^INDIAVIX).
+    NSE historical endpoint blocked on GitHub Actions — yfinance works reliably.
 
     Returns:
         DataFrame with columns: Date, VIX_Open, VIX_High, VIX_Low, VIX_Close
     """
-    from datetime import timedelta
-
-    if to_date is None:
-        to_dt = datetime.today()
-    else:
-        to_dt = datetime.strptime(to_date, "%d-%m-%Y")
-
-    if from_date is None:
-        from_dt = to_dt - timedelta(days=365 * 5)
-    else:
-        from_dt = datetime.strptime(from_date, "%d-%m-%Y")
-
-    from_str = from_dt.strftime("%d-%m-%Y")
-    to_str = to_dt.strftime("%d-%m-%Y")
-
-    url = (
-        f"https://www.nseindia.com/api/historical/vixhistory"
-        f"?from={from_str}&to={to_str}"
-    )
-    logger.info(f"Fetching historical India VIX | {from_str} → {to_str}")
-
+    logger.info("Fetching historical India VIX via yfinance (^INDIAVIX)...")
     try:
-        resp = session.get(url, timeout=15)
-        resp.raise_for_status()
-        raw = resp.json()
-
-        records = raw.get("data", [])
-        if not records:
-            logger.warning("No historical VIX data returned from NSE.")
+        df = yf.download("^INDIAVIX", period="5y", progress=False, auto_adjust=True)
+        if df.empty:
+            logger.warning("yfinance returned empty DataFrame for ^INDIAVIX historical.")
             return pd.DataFrame()
 
-        rows = []
-        for rec in records:
-            rows.append({
-                "Date": pd.to_datetime(rec.get("EOD_TIMESTAMP"), dayfirst=True).date(),
-                "VIX_Open": float(rec.get("EOD_OPEN_INDEX_VAL", 0)),
-                "VIX_High": float(rec.get("EOD_HIGH_INDEX_VAL", 0)),
-                "VIX_Low": float(rec.get("EOD_LOW_INDEX_VAL", 0)),
-                "VIX_Close": float(rec.get("EOD_CLOSING_INDEX_VAL", 0)),
-            })
+        df.reset_index(inplace=True)
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        df.rename(columns={
+            "Date":  "Date",
+            "Open":  "VIX_Open",
+            "High":  "VIX_High",
+            "Low":   "VIX_Low",
+            "Close": "VIX_Close",
+        }, inplace=True)
+        df = df[["Date", "VIX_Open", "VIX_High", "VIX_Low", "VIX_Close"]]
+        df["Date"] = pd.to_datetime(df["Date"]).dt.date
+        df = df.sort_values("Date").reset_index(drop=True)
 
-        df = pd.DataFrame(rows).sort_values("Date").reset_index(drop=True)
         save_path = RAW_DIR / "india_vix_historical.csv"
         df.to_csv(save_path, index=False)
         logger.info(f"Historical VIX saved → {save_path} | rows={len(df)}")
@@ -344,43 +317,77 @@ def fetch_gift_nifty_proxy(period: str = "5y") -> pd.DataFrame:
 
 def fetch_fii_dii_nse(session: requests.Session) -> pd.DataFrame:
     """
-    Fetches FII/DII trading activity from NSE API.
-    This is the primary source — provisional intraday data.
+    Fetches FII/DII trading activity via nsepython library.
+    nsepython uses a CDN-cached version of NSE data that works
+    from GitHub Actions IPs (bypasses the 403 block on direct NSE calls).
 
     Returns:
         DataFrame with columns: Date, FII_Net_Buy, DII_Net_Buy
     """
-    url = CFG["data_sources"]["fii_dii_url"]
-    logger.info("Fetching FII/DII from NSE API...")
+    logger.info("Fetching FII/DII via nsepython...")
+
+    if not NSEPYTHON_AVAILABLE:
+        logger.error("nsepython not installed — FII/DII fetch skipped.")
+        return pd.DataFrame()
 
     try:
-        resp = session.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        # nsefii() returns a DataFrame with FII/DII data
+        df = nsefii()
 
-        rows = []
-        for item in data:
-            try:
-                rows.append({
-                    "Date": pd.to_datetime(item.get("date"), dayfirst=True).date(),
-                    "FII_Net_Buy": float(str(item.get("fiiNetBuy", "0")).replace(",", "")),
-                    "DII_Net_Buy": float(str(item.get("diiNetBuy", "0")).replace(",", "")),
-                })
-            except (ValueError, TypeError) as e:
-                logger.warning(f"FII/DII row parse error: {e} | item={item}")
-
-        if not rows:
-            logger.warning("NSE FII/DII API returned no usable rows.")
+        if df is None or df.empty:
+            logger.warning("nsepython returned empty FII/DII data.")
             return pd.DataFrame()
 
-        df = pd.DataFrame(rows).sort_values("Date").reset_index(drop=True)
+        logger.info(f"nsepython FII/DII raw columns: {list(df.columns)}")
+
+        # Normalise column names — nsepython column names vary by version
+        df.columns = [str(c).strip() for c in df.columns]
+
+        # Map to our standard column names
+        col_map = {}
+        for col in df.columns:
+            col_lower = col.lower()
+            if "date" in col_lower:
+                col_map[col] = "Date"
+            elif "fii" in col_lower and "net" in col_lower:
+                col_map[col] = "FII_Net_Buy"
+            elif "dii" in col_lower and "net" in col_lower:
+                col_map[col] = "DII_Net_Buy"
+
+        df.rename(columns=col_map, inplace=True)
+
+        required = {"Date", "FII_Net_Buy", "DII_Net_Buy"}
+        missing = required - set(df.columns)
+        if missing:
+            logger.warning(f"FII/DII missing columns after mapping: {missing}")
+            logger.warning(f"Available columns: {list(df.columns)}")
+            # Save raw for inspection
+            df.to_csv(RAW_DIR / "fii_dii_raw_debug.csv", index=False)
+            return pd.DataFrame()
+
+        df = df[["Date", "FII_Net_Buy", "DII_Net_Buy"]].copy()
+        df["Date"] = pd.to_datetime(df["Date"], dayfirst=True).dt.date
+
+        # Clean numeric columns
+        for col in ["FII_Net_Buy", "DII_Net_Buy"]:
+            df[col] = (
+                df[col].astype(str)
+                .str.replace(",", "", regex=False)
+                .str.replace("(", "-", regex=False)
+                .str.replace(")", "", regex=False)
+                .str.strip()
+            )
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df.dropna().sort_values("Date").reset_index(drop=True)
+
         save_path = RAW_DIR / "fii_dii_nse.csv"
         df.to_csv(save_path, index=False)
-        logger.info(f"FII/DII (NSE) saved → {save_path} | rows={len(df)}")
+        logger.info(f"FII/DII saved → {save_path} | rows={len(df)}")
         return df
 
     except Exception as e:
-        logger.error(f"NSE FII/DII fetch failed: {e}")
+        logger.error(f"nsepython FII/DII fetch failed: {e}")
         return pd.DataFrame()
 
 
@@ -422,28 +429,29 @@ def fetch_fii_dii_nsdl() -> pd.DataFrame:
 
 def fetch_sensex_option_chain(session: requests.Session) -> pd.DataFrame:
     """
-    Fetches the Sensex option chain snapshot from NSE API.
-
-    BSE Sensex options are listed on NSE under symbol 'SENSEX'.
-    Endpoint: https://www.nseindia.com/api/option-chain-indices?symbol=SENSEX
+    Fetches the Sensex option chain snapshot via nsepython library.
+    nsepython bypasses the 403 block that GitHub Actions IPs get
+    from direct NSE API calls.
 
     Returns:
         DataFrame with option chain data (strikes, OI, IV, LTP etc.)
     """
     symbol = CFG["option_chain"]["symbol"]
-    url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-    logger.info(f"Fetching Sensex option chain | symbol={symbol}")
+    logger.info(f"Fetching Sensex option chain via nsepython | symbol={symbol}")
+
+    if not NSEPYTHON_AVAILABLE:
+        logger.error("nsepython not installed — option chain fetch skipped.")
+        return pd.DataFrame()
 
     try:
-        # Must re-prime session before option chain call
-        session.get("https://www.nseindia.com/option-chain", timeout=10)
-        time.sleep(1)
+        # nse_optionchain_scrapper returns raw JSON dict
+        raw = nse_optionchain_scrapper(symbol)
 
-        resp = session.get(url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        if not raw:
+            logger.warning("nsepython option chain: empty response.")
+            return pd.DataFrame()
 
-        records = data.get("records", {})
+        records = raw.get("records", {})
         chain_data = records.get("data", [])
         expiry_dates = records.get("expiryDates", [])
         underlying_value = records.get("underlyingValue", None)
@@ -460,49 +468,45 @@ def fetch_sensex_option_chain(session: requests.Session) -> pd.DataFrame:
         for item in chain_data:
             strike = item.get("strikePrice")
 
-            # CE side
             ce = item.get("CE", {})
             if ce:
                 rows.append({
-                    "Snapshot_Time": snapshot_time,
-                    "Underlying_Value": underlying_value,
-                    "Option_Type": "CE",
-                    "Strike": strike,
-                    "Expiry": ce.get("expiryDate"),
-                    "LTP": ce.get("lastPrice"),
-                    "OI": ce.get("openInterest"),
-                    "OI_Change": ce.get("changeinOpenInterest"),
-                    "IV": ce.get("impliedVolatility"),
-                    "Volume": ce.get("totalTradedVolume"),
-                    "Bid": ce.get("bidprice"),
-                    "Ask": ce.get("askPrice"),
+                    "Snapshot_Time":     snapshot_time,
+                    "Underlying_Value":  underlying_value,
+                    "Option_Type":       "CE",
+                    "Strike":            strike,
+                    "Expiry":            ce.get("expiryDate"),
+                    "LTP":               ce.get("lastPrice"),
+                    "OI":                ce.get("openInterest"),
+                    "OI_Change":         ce.get("changeinOpenInterest"),
+                    "IV":                ce.get("impliedVolatility"),
+                    "Volume":            ce.get("totalTradedVolume"),
+                    "Bid":               ce.get("bidprice"),
+                    "Ask":               ce.get("askPrice"),
                 })
 
-            # PE side
             pe = item.get("PE", {})
             if pe:
                 rows.append({
-                    "Snapshot_Time": snapshot_time,
-                    "Underlying_Value": underlying_value,
-                    "Option_Type": "PE",
-                    "Strike": strike,
-                    "Expiry": pe.get("expiryDate"),
-                    "LTP": pe.get("lastPrice"),
-                    "OI": pe.get("openInterest"),
-                    "OI_Change": pe.get("changeinOpenInterest"),
-                    "IV": pe.get("impliedVolatility"),
-                    "Volume": pe.get("totalTradedVolume"),
-                    "Bid": pe.get("bidprice"),
-                    "Ask": pe.get("askPrice"),
+                    "Snapshot_Time":     snapshot_time,
+                    "Underlying_Value":  underlying_value,
+                    "Option_Type":       "PE",
+                    "Strike":            strike,
+                    "Expiry":            pe.get("expiryDate"),
+                    "LTP":               pe.get("lastPrice"),
+                    "OI":                pe.get("openInterest"),
+                    "OI_Change":         pe.get("changeinOpenInterest"),
+                    "IV":                pe.get("impliedVolatility"),
+                    "Volume":            pe.get("totalTradedVolume"),
+                    "Bid":               pe.get("bidprice"),
+                    "Ask":               pe.get("askPrice"),
                 })
 
         if not rows:
-            logger.warning("Option chain: no rows parsed.")
+            logger.warning("Option chain: no rows parsed from nsepython response.")
             return pd.DataFrame()
 
         df = pd.DataFrame(rows)
-
-        # Save with date-stamped filename
         today_str = date.today().strftime("%Y%m%d")
         save_path = RAW_DIR / f"sensex_option_chain_{today_str}.csv"
         df.to_csv(save_path, index=False)
@@ -537,6 +541,13 @@ def fetch_news_sentiment() -> pd.DataFrame:
         "Moneycontrol": CFG["data_sources"]["moneycontrol_rss"],
         "EconomicTimes": CFG["data_sources"]["economic_times_rss"],
     }
+
+    # feedparser needs a browser-like User-Agent to avoid being blocked
+    feedparser.USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
 
     all_rows = []
     today = date.today()
