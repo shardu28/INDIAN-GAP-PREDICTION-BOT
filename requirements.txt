@@ -7,6 +7,7 @@
 pandas
 numpy
 yfinance
+nsepython
 
 # --- HTTP & Scraping ---
 requests
@@ -55,5 +56,6 @@ plotly
 python-dateutil
 pytz
 tqdm
+
 
 
