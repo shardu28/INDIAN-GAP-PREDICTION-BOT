@@ -59,8 +59,7 @@ jobs:
         run: |
           echo "=== Installed packages ==="
           pip show nsepythonserver || echo "nsepythonserver NOT found"
-          pip show nsepython || echo "nsepython NOT found"
-          python -c "from nsepythonserver import nse_optionchain_scrapper, nsefii; print('nsepythonserver import OK')" || echo "nsepythonserver import FAILED"
+          python -c "import nsepythonserver; print('All exports:', dir(nsepythonserver))" || echo "nsepythonserver import FAILED"
 
       # -----------------------------------------------------------------
       - name: Create runtime directories
