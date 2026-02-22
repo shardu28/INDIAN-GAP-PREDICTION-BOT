@@ -32,10 +32,26 @@ import feedparser
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 try:
-    from nsepythonserver import nse_optionchain_scrapper, nsefii
+    import nsepythonserver as _nse
+    _NSE_EXPORTS = dir(_nse)
+    if "nse_optionchain_scrapper" in _NSE_EXPORTS:
+        nse_optionchain_scrapper = _nse.nse_optionchain_scrapper
+        OPTION_CHAIN_AVAILABLE = True
+    else:
+        OPTION_CHAIN_AVAILABLE = False
+    _fii_candidates = ["nsefii", "fii_dii", "nse_fii", "get_fii_dii"]
+    _fii_fn = next((getattr(_nse, f) for f in _fii_candidates if f in _NSE_EXPORTS), None)
+    if _fii_fn:
+        nsefii = _fii_fn
+        FII_AVAILABLE = True
+    else:
+        FII_AVAILABLE = False
     NSEPYTHON_AVAILABLE = True
 except ImportError:
     NSEPYTHON_AVAILABLE = False
+    OPTION_CHAIN_AVAILABLE = False
+    FII_AVAILABLE = False
+    _NSE_EXPORTS = []
 
 # ---------------------------------------------------------------------------
 # Load config
@@ -317,78 +333,91 @@ def fetch_gift_nifty_proxy(period: str = "5y") -> pd.DataFrame:
 
 def fetch_fii_dii_nse(session: requests.Session) -> pd.DataFrame:
     """
-    Fetches FII/DII trading activity via nsepython library.
-    nsepython uses a CDN-cached version of NSE data that works
-    from GitHub Actions IPs (bypasses the 403 block on direct NSE calls).
+    Fetches FII/DII trading activity.
+
+    Strategy (in order):
+      1. nsepythonserver — if FII function found at import time
+      2. Direct NSE API with different headers (sometimes works from cloud)
+      3. Returns empty — NSDL fallback handles the rest
 
     Returns:
         DataFrame with columns: Date, FII_Net_Buy, DII_Net_Buy
     """
-    logger.info("Fetching FII/DII via nsepython...")
+    # --- Primary: nsepythonserver if FII function available ---
+    if FII_AVAILABLE:
+        logger.info("Fetching FII/DII via nsepythonserver...")
+        try:
+            df = nsefii()
+            if df is not None and not df.empty:
+                logger.info(f"nsepythonserver FII/DII raw columns: {list(df.columns)}")
+                df.columns = [str(c).strip() for c in df.columns]
+                col_map = {}
+                for col in df.columns:
+                    cl = col.lower()
+                    if "date" in cl:
+                        col_map[col] = "Date"
+                    elif "fii" in cl and "net" in cl:
+                        col_map[col] = "FII_Net_Buy"
+                    elif "dii" in cl and "net" in cl:
+                        col_map[col] = "DII_Net_Buy"
+                df.rename(columns=col_map, inplace=True)
+                if {"Date", "FII_Net_Buy", "DII_Net_Buy"}.issubset(df.columns):
+                    df = df[["Date", "FII_Net_Buy", "DII_Net_Buy"]].copy()
+                    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True).dt.date
+                    for col in ["FII_Net_Buy", "DII_Net_Buy"]:
+                        df[col] = pd.to_numeric(
+                            df[col].astype(str).str.replace(",", "").str.replace("(", "-").str.replace(")", ""),
+                            errors="coerce"
+                        )
+                    df = df.dropna().sort_values("Date").reset_index(drop=True)
+                    save_path = RAW_DIR / "fii_dii_nse.csv"
+                    df.to_csv(save_path, index=False)
+                    logger.info(f"FII/DII saved → {save_path} | rows={len(df)}")
+                    return df
+                else:
+                    logger.warning(f"FII/DII column mapping failed. Got: {list(df.columns)}")
+                    df.to_csv(RAW_DIR / "fii_dii_raw_debug.csv", index=False)
+        except Exception as e:
+            logger.error(f"nsepythonserver FII/DII failed: {e}")
+    else:
+        logger.warning(f"FII function not in nsepythonserver. Exports: {_NSE_EXPORTS if NSEPYTHON_AVAILABLE else 'not installed'}")
 
-    if not NSEPYTHON_AVAILABLE:
-        logger.error("nsepython not installed — FII/DII fetch skipped.")
-        return pd.DataFrame()
-
+    # --- Fallback: Direct NSE API with cloud-friendly headers ---
+    logger.info("Attempting FII/DII via direct NSE API call...")
     try:
-        # nsefii() returns a DataFrame with FII/DII data
-        df = nsefii()
-
-        if df is None or df.empty:
-            logger.warning("nsepython returned empty FII/DII data.")
-            return pd.DataFrame()
-
-        logger.info(f"nsepython FII/DII raw columns: {list(df.columns)}")
-
-        # Normalise column names — nsepython column names vary by version
-        df.columns = [str(c).strip() for c in df.columns]
-
-        # Map to our standard column names
-        col_map = {}
-        for col in df.columns:
-            col_lower = col.lower()
-            if "date" in col_lower:
-                col_map[col] = "Date"
-            elif "fii" in col_lower and "net" in col_lower:
-                col_map[col] = "FII_Net_Buy"
-            elif "dii" in col_lower and "net" in col_lower:
-                col_map[col] = "DII_Net_Buy"
-
-        df.rename(columns=col_map, inplace=True)
-
-        required = {"Date", "FII_Net_Buy", "DII_Net_Buy"}
-        missing = required - set(df.columns)
-        if missing:
-            logger.warning(f"FII/DII missing columns after mapping: {missing}")
-            logger.warning(f"Available columns: {list(df.columns)}")
-            # Save raw for inspection
-            df.to_csv(RAW_DIR / "fii_dii_raw_debug.csv", index=False)
-            return pd.DataFrame()
-
-        df = df[["Date", "FII_Net_Buy", "DII_Net_Buy"]].copy()
-        df["Date"] = pd.to_datetime(df["Date"], dayfirst=True).dt.date
-
-        # Clean numeric columns
-        for col in ["FII_Net_Buy", "DII_Net_Buy"]:
-            df[col] = (
-                df[col].astype(str)
-                .str.replace(",", "", regex=False)
-                .str.replace("(", "-", regex=False)
-                .str.replace(")", "", regex=False)
-                .str.strip()
-            )
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        df = df.dropna().sort_values("Date").reset_index(drop=True)
-
-        save_path = RAW_DIR / "fii_dii_nse.csv"
-        df.to_csv(save_path, index=False)
-        logger.info(f"FII/DII saved → {save_path} | rows={len(df)}")
-        return df
-
+        url = "https://www.nseindia.com/api/fiidiiTradeReact"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/market-data/fii-dii-activity",
+            "Origin": "https://www.nseindia.com",
+        }
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            rows = []
+            for item in data:
+                try:
+                    rows.append({
+                        "Date": pd.to_datetime(item.get("date"), dayfirst=True).date(),
+                        "FII_Net_Buy": float(str(item.get("fiiNetBuy", "0")).replace(",", "")),
+                        "DII_Net_Buy": float(str(item.get("diiNetBuy", "0")).replace(",", "")),
+                    })
+                except Exception:
+                    pass
+            if rows:
+                df = pd.DataFrame(rows).sort_values("Date").reset_index(drop=True)
+                save_path = RAW_DIR / "fii_dii_nse.csv"
+                df.to_csv(save_path, index=False)
+                logger.info(f"FII/DII (direct NSE) saved → {save_path} | rows={len(df)}")
+                return df
+        else:
+            logger.warning(f"Direct NSE FII/DII returned HTTP {resp.status_code}")
     except Exception as e:
-        logger.error(f"nsepython FII/DII fetch failed: {e}")
-        return pd.DataFrame()
+        logger.error(f"Direct NSE FII/DII failed: {e}")
+
+    return pd.DataFrame()
 
 
 def fetch_fii_dii_nsdl() -> pd.DataFrame:
@@ -439,8 +468,8 @@ def fetch_sensex_option_chain(session: requests.Session) -> pd.DataFrame:
     symbol = CFG["option_chain"]["symbol"]
     logger.info(f"Fetching Sensex option chain via nsepython | symbol={symbol}")
 
-    if not NSEPYTHON_AVAILABLE:
-        logger.error("nsepython not installed — option chain fetch skipped.")
+    if not OPTION_CHAIN_AVAILABLE:
+        logger.error("nse_optionchain_scrapper not available in nsepythonserver — option chain fetch skipped.")
         return pd.DataFrame()
 
     try:
@@ -814,6 +843,9 @@ def run_data_collection(mode: str = "live") -> dict:
         dict of all DataFrames collected
     """
     logger.info(f"=== Data Collection START | mode={mode} ===")
+    logger.info(f"nsepythonserver available: {NSEPYTHON_AVAILABLE} | option_chain: {OPTION_CHAIN_AVAILABLE} | fii: {FII_AVAILABLE}")
+    if NSEPYTHON_AVAILABLE and (not OPTION_CHAIN_AVAILABLE or not FII_AVAILABLE):
+        logger.warning(f"nsepythonserver exports: {_NSE_EXPORTS}")
     period = "5y" if mode == "backtest" else "5d"
 
     # Initialise DB
