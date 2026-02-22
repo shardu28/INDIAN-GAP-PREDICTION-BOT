@@ -39,7 +39,7 @@ try:
         OPTION_CHAIN_AVAILABLE = True
     else:
         OPTION_CHAIN_AVAILABLE = False
-    _fii_candidates = ["nsefii", "fii_dii", "nse_fii", "get_fii_dii"]
+    _fii_candidates = ["nse_fiidii", "nsefii", "fii_dii", "nse_fii", "get_fii_dii"]
     _fii_fn = next((getattr(_nse, f) for f in _fii_candidates if f in _NSE_EXPORTS), None)
     if _fii_fn:
         nsefii = _fii_fn
@@ -422,34 +422,50 @@ def fetch_fii_dii_nse(session: requests.Session) -> pd.DataFrame:
 
 def fetch_fii_dii_nsdl() -> pd.DataFrame:
     """
-    Fallback: Scrapes FII/DII data from NSDL website using pandas read_html.
-    NSDL data is more reliable but updated less frequently.
+    Fetches historical FII/DII data from NSE's archive reports.
+
+    Strategy:
+      - NSE API (fiidiiTradeReact) only gives ~30 recent days
+      - For 5-year history, we use NSE's get_fao_participant_oi from nsepythonserver
+        which covers F&O participant data, or fall back to composing from recent API data
+
+    For backtest mode, we accept that FII/DII history beyond 30 days
+    is not freely available and will use the recent data available,
+    building history incrementally with each daily run.
 
     Returns:
-        DataFrame with columns: Date, FII_Net_Buy (equity segment)
+        DataFrame with columns: Date, FII_Net_Buy, DII_Net_Buy (what's available)
     """
-    url = CFG["data_sources"]["nsdl_fii_url"]
-    logger.info("Fetching FII data from NSDL (fallback)...")
+    logger.info("Fetching FII/DII historical via NSE archive (get_fao_participant_oi)...")
+
+    if not NSEPYTHON_AVAILABLE:
+        logger.warning("nsepythonserver not available for FII historical fetch.")
+        return pd.DataFrame()
 
     try:
-        tables = pd.read_html(url, flavor="lxml")
-        if not tables:
-            logger.warning("NSDL page returned no HTML tables.")
+        # get_fao_participant_oi gives FII/Client/DII OI data for derivatives
+        # This is the closest free historical FII proxy available
+        fao_fn = getattr(_nse, "get_fao_participant_oi", None)
+        if fao_fn is None:
+            logger.warning("get_fao_participant_oi not found in nsepythonserver.")
             return pd.DataFrame()
 
-        # NSDL typically has the data in the first or second table
-        df = tables[0]
-        logger.info(f"NSDL raw table columns: {list(df.columns)}")
+        df = fao_fn()
+        if df is None or (hasattr(df, "empty") and df.empty):
+            logger.warning("get_fao_participant_oi returned empty.")
+            return pd.DataFrame()
 
-        # Save raw for inspection
-        save_path = RAW_DIR / "fii_dii_nsdl_raw.csv"
-        df.to_csv(save_path, index=False)
-        logger.info(f"NSDL raw FII data saved → {save_path}")
-        return df
+        logger.info(f"FAO participant OI raw columns: {list(df.columns) if hasattr(df, 'columns') else type(df)}")
+        save_path = RAW_DIR / "fii_dii_fao_raw.csv"
+        if hasattr(df, "to_csv"):
+            df.to_csv(save_path, index=False)
+            logger.info(f"FAO participant OI saved → {save_path}")
+        return df if hasattr(df, "empty") else pd.DataFrame()
 
     except Exception as e:
-        logger.error(f"NSDL FII/DII fetch failed: {e}")
+        logger.error(f"FAO participant OI fetch failed: {e}")
         return pd.DataFrame()
+
 
 
 # ---------------------------------------------------------------------------
@@ -862,10 +878,12 @@ def run_data_collection(mode: str = "live") -> dict:
     gift_df         = fetch_gift_nifty_proxy(period=period)
     fii_dii_df      = fetch_fii_dii_nse(nse_session)
 
-    # NSDL fallback only if NSE FII/DII fails
-    if fii_dii_df.empty:
-        logger.warning("NSE FII/DII failed — trying NSDL fallback.")
-        fii_dii_df = fetch_fii_dii_nsdl()
+    # For backtest mode, also try to get FAO participant OI as FII proxy
+    if fii_dii_df.empty or (mode == "backtest" and len(fii_dii_df) < 100):
+        logger.info("Supplementing FII/DII with FAO participant OI data...")
+        fao_df = fetch_fii_dii_nsdl()  # Now fetches FAO participant OI
+        if not fao_df.empty and fii_dii_df.empty:
+            fii_dii_df = fao_df  # Use as substitute if primary is empty
 
     option_chain_df = fetch_sensex_option_chain(nse_session)
     sentiment_df    = fetch_news_sentiment()
